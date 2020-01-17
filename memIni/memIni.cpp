@@ -55,7 +55,8 @@ namespace memIni
 	static std::thread g_tWrite;
 	static std::shared_ptr<boost::asio::io_service> g_pIniService;
 	static std::shared_ptr<boost::asio::io_service::work> g_pIniWork;
-	static std::string g_sDingDing;
+	//static std::string g_sDingDing;
+	static LPERRCALLBACK g_lpErrCallBack = nullptr;
 
 	DWORD CopyString(const std::string& s, LPSTR lpReturnedString, DWORD nSize)
 	{
@@ -153,8 +154,9 @@ namespace memIni
 			boost::property_tree::ini_parser::read_ini(sin, pt);
 		}
 		catch (boost::property_tree::ini_parser_error & e) {
-			auto msg = strprintf("%s catch error! msg:%s, file:%s, line:%d", func, e.message(), filename, e.line());
-			LOG_ERROR("%s", msg);
+			if (g_lpErrCallBack) {
+				g_lpErrCallBack(func, e.message().c_str(), filename, e.line());
+			}
 			return FALSE;
 		}
 		return TRUE;
@@ -168,8 +170,9 @@ namespace memIni
 			str = sout.str();
 		}
 		catch (boost::property_tree::ini_parser_error & e) {
-			auto msg = strprintf("%s catch error! msg:%s, file:%s, line:%d", func, e.message(), filename, e.line());
-			LOG_ERROR("%s", msg);
+			if (g_lpErrCallBack) {
+				g_lpErrCallBack(func, e.message().c_str(), filename, e.line());
+			}
 			return FALSE;
 		}
 		return TRUE;
@@ -318,10 +321,18 @@ namespace memIni
 	}
 
 
-	bool Init(INT nWriteInterval)
+	BOOL Init(INT nWriteInterval, /*LPCSTR lpDingDing,*/ LPERRCALLBACK lpErrCallBack)
 	{
 		if (!g_bInited.exchange(TRUE))
 		{
+			/*
+			if (lpDingDing) {
+				g_sDingDing = lpDingDing;
+			}
+			*/
+			
+			g_lpErrCallBack = lpErrCallBack;
+
 			g_pIniMap = std::make_shared<ini_map>();
 
 			g_pIniService = std::make_shared<boost::asio::io_service>();
