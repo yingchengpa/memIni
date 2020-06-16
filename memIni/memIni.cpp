@@ -6,13 +6,12 @@
 #include <map>
 #include <sstream>
 #include <filesystem>
-#include <tchar.h>
-#include "va_wrap.h"
 
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/ini_parser.hpp>
 #include <boost/asio.hpp>
 
+#include <tchar.h>
 #include "memIni.h"
 
 #if defined(_MSC_VER)
@@ -22,8 +21,6 @@
 #else
 #	define memIni_TLS thread_local
 #endif
-
-#define LOG_ERROR()
 
 namespace memIni 
 {
@@ -50,13 +47,15 @@ namespace memIni
 
 	typedef std::map<std::string, std::shared_ptr<ini_info>> ini_map;
 
-	static std::atomic<bool> g_bInited = false;
+	static std::atomic<BOOL> g_bInited = FALSE;
 	static std::shared_ptr<const ini_map> g_pIniMap;
 	static std::thread g_tWrite;
 	static std::shared_ptr<boost::asio::io_service> g_pIniService;
 	static std::shared_ptr<boost::asio::io_service::work> g_pIniWork;
 	//static std::string g_sDingDing;
 	static LPERRCALLBACK g_lpErrCallBack = nullptr;
+
+	#define ini_name(s) boost::property_tree::path_of<std::string>::type(s, '\0')
 
 	DWORD CopyString(const std::string& s, LPSTR lpReturnedString, DWORD nSize)
 	{
@@ -109,10 +108,10 @@ namespace memIni
 
 	BOOL BackupIniFile(const std::string& file, time_t timestamp)
 	{
-		auto path = std::tr2::sys::path(file);
+		auto path = std::filesystem::path(file);
 		//auto bak_path = std::tr2::sys::path(strprintf("%s.bak.%I64d", file, (int64_t)timestamp));
-		auto bak_path = std::tr2::sys::path(file + ".bak");
-		std::tr2::sys::copy_file(path, bak_path, std::tr2::sys::copy_option::overwrite_if_exists);
+		auto bak_path = std::filesystem::path(file + ".bak");
+		std::filesystem::copy_file(path, bak_path, std::filesystem::copy_options::overwrite_existing);
 		return TRUE;
 	}
 
@@ -145,7 +144,6 @@ namespace memIni
 		return TRUE;
 	}
 
-
 	BOOL ReadIni(const char* func, const char* filename, const std::string& str, boost::property_tree::iptree& pt)
 	{
 		try {
@@ -165,11 +163,25 @@ namespace memIni
 	BOOL WriteIni(const char* func, const char* filename, std::string& str, const boost::property_tree::iptree& pt)
 	{
 		try {
-			std::ostringstream sout;
+			std::stringstream sout;
 			boost::property_tree::ini_parser::write_ini(sout, pt);
+#if defined(_MSC_VER)
+			{
+				std::stringstream sout2;
+				std::string l;
+				while (std::getline(sout, l)) {
+					sout2 << l << '\r' << std::endl;
+				}
+				str = sout2.str();
+			}
+#else
 			str = sout.str();
+#endif
 		}
 		catch (boost::property_tree::ini_parser_error & e) {
+			//auto msg = strprintf("%s catch error! msg:%s, file:%s, line:%d", func, e.message(), filename, e.line());
+			//LOG_ERROR("%s", msg);
+			//SendDingDing(msg);
 			if (g_lpErrCallBack) {
 				g_lpErrCallBack(func, e.message().c_str(), filename, e.line());
 			}
@@ -211,8 +223,8 @@ namespace memIni
 	{
 		auto func = [&](ini_info& info)
 		{
-			auto path = std::tr2::sys::path(lpFileName);
-			info.timestamp = std::tr2::sys::last_write_time(path);
+			auto path = std::filesystem::path(lpFileName);
+			info.timestamp = std::chrono::duration_cast<std::chrono::seconds>(std::filesystem::last_write_time(path).time_since_epoch()).count();
 
 			info.flag = ini_info::failed;
 
@@ -243,7 +255,7 @@ namespace memIni
 				return FALSE;
 			}
 
-			if (!std::tr2::sys::path(lpFileName).is_complete()) {
+			if (std::filesystem::path(lpFileName).is_relative()) {
 				GetWindowsDirectory(szWinIni, MAX_PATH);
 				_tcscat(szWinIni, "\\");
 				lpFileName = _tcscat(szWinIni, lpFileName);
@@ -299,8 +311,8 @@ namespace memIni
 
 		for (auto& p : *m)
 		{
-			auto path = std::tr2::sys::path(p.first);
-			auto timestamp = std::tr2::sys::last_write_time(path);
+			auto path = std::filesystem::path(p.first);
+			auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(std::filesystem::last_write_time(path).time_since_epoch()).count();
 			if (timestamp && p.second->timestamp != timestamp) {
 				LoadPrivateProfile(p.first.c_str());
 			}
@@ -345,7 +357,7 @@ namespace memIni
 			}
 			StartTimer(nWriteInterval, OnTimer);
 		}
-		return true;
+		return TRUE;
 	}
 
 	VOID UnInit()
@@ -359,27 +371,23 @@ namespace memIni
 			if (g_tWrite.joinable()) {
 				g_tWrite.join();
 			}
+
+			g_pIniWork.reset();
+			g_pIniService.reset();
 		}
 	}
 
 
-	bool IsInited() {
+	BOOL IsInited() {
 		return g_bInited;
 	}
-	/*
-	FARPROC GetPrivateProfileFunc(LPCTSTR szFun)
-	{
-		FARPROC f = nullptr;
-		if (auto h = LoadLibrary("Kernel32.dll")) {
-			f = GetProcAddress(h, szFun);
-			FreeLibrary(h);
-		}
-		return f;
-	}
-	*/
 
 	UINT GetPrivateProfileInt(LPCSTR lpAppName, LPCSTR lpKeyName, INT nDefault, LPCSTR lpFileName)
 	{
+		if (!IsInited()) {
+			return ::GetPrivateProfileInt(lpAppName, lpKeyName, nDefault, lpFileName);
+		}
+
 		if (!lpAppName) {
 			return nDefault;
 		}
@@ -391,12 +399,16 @@ namespace memIni
 
 		auto& pt = pf->pt;
 		if (pt.find(lpAppName) != pt.not_found()) {
-			nDefault = pt.get_child(lpAppName).get<INT>(lpKeyName, nDefault);
+			nDefault = pt.get_child(ini_name(lpAppName)).get<INT>(ini_name(lpKeyName), nDefault);
 		}
 		return nDefault;
 	}
 	DWORD GetPrivateProfileString(LPCSTR lpAppName, LPCSTR lpKeyName, LPCSTR lpDefault, LPSTR lpReturnedString, DWORD nSize, LPCSTR lpFileName)
 	{
+		if (!IsInited()) {
+			return ::GetPrivateProfileString(lpAppName, lpKeyName, lpDefault, lpReturnedString, nSize, lpFileName);
+		}
+
 		if (!lpAppName) {
 			return GetPrivateProfileSectionNames(lpReturnedString, nSize, lpFileName);
 		}
@@ -413,7 +425,7 @@ namespace memIni
 		auto& pt = pf->pt;
 		std::string s = (lpDefault ? lpDefault : "");
 		if (pt.find(lpAppName) != pt.not_found()) {
-			s = pt.get_child(lpAppName).get<std::string>(lpKeyName, s);
+			s = pt.get_child(ini_name(lpAppName)).get<std::string>(ini_name(lpKeyName), s);
 		}
 		s += '\0';
 
@@ -421,6 +433,10 @@ namespace memIni
 	}
 	DWORD GetPrivateProfileSection(LPCSTR lpAppName, LPSTR lpReturnedString, DWORD nSize, LPCSTR lpFileName)
 	{
+		if (!IsInited()) {
+			return ::GetPrivateProfileSection(lpAppName, lpReturnedString, nSize, lpFileName);
+		}
+
 		if (!lpAppName) {
 			return 0;
 		}
@@ -433,7 +449,7 @@ namespace memIni
 		auto& pt = pf->pt;
 		std::stringstream sout;
 		if (pt.find(lpAppName) != pt.not_found()) {
-			for (auto& i : pt.get_child(lpAppName)) {
+			for (auto& i : pt.get_child(ini_name(lpAppName))) {
 				sout << i.first << '=' << i.second.get_value<std::string>("") << '\0';
 			}
 		}
@@ -443,6 +459,10 @@ namespace memIni
 	}
 	DWORD GetPrivateProfileSectionKeyNames(LPCSTR lpAppName, LPSTR lpReturnedString, DWORD nSize, LPCSTR lpFileName)
 	{
+		if (!IsInited()) {
+			return ::GetPrivateProfileString(lpAppName, NULL, "", lpReturnedString, nSize, lpFileName);
+		}
+
 		if (!lpAppName) {
 			return 0;
 		}
@@ -456,7 +476,7 @@ namespace memIni
 		auto& pt = pf->pt;
 		std::stringstream sout;
 		if (pt.find(lpAppName) != pt.not_found()) {
-			for (auto& i : pt.get_child(lpAppName)) {
+			for (auto& i : pt.get_child(ini_name(lpAppName))) {
 				sout << i.first << '\0';
 			}
 		}
@@ -466,6 +486,10 @@ namespace memIni
 	}
 	DWORD GetPrivateProfileSectionNames(LPSTR lpReturnedString, DWORD nSize, LPCSTR lpFileName)
 	{
+		if (!IsInited()) {
+			return ::GetPrivateProfileSectionNames(lpReturnedString, nSize, lpFileName);
+		}
+
 		auto pf = GetPrivateProfilePtr(lpFileName);
 		if (!pf) {
 			return 0;
@@ -482,6 +506,10 @@ namespace memIni
 	}
 	BOOL GetPrivateProfileStruct(LPCSTR lpAppName, LPCSTR lpKeyName, LPVOID lpStruct, UINT uSizeStruct, LPCSTR lpFileName)
 	{
+		if (!IsInited()) {
+			return ::GetPrivateProfileStruct(lpAppName, lpKeyName, lpStruct, uSizeStruct, lpFileName);
+		}
+
 		if (!lpAppName || !lpKeyName) {
 			return FALSE;
 		}
@@ -517,6 +545,10 @@ namespace memIni
 	}
 	BOOL WritePrivateProfileString(LPCSTR lpAppName, LPCSTR lpKeyName, LPCSTR lpString, LPCSTR lpFileName)
 	{
+		if (!IsInited()) {
+			return ::WritePrivateProfileString(lpAppName, lpKeyName, lpString, lpFileName);
+		}
+
 		if (!lpAppName) {
 			return FALSE;
 		}
@@ -534,15 +566,15 @@ namespace memIni
 			}
 			else if (!lpString) {
 				if (pt.find(lpAppName) != pt.not_found()) {
-					pt.get_child(lpAppName).erase(lpKeyName);
+					pt.get_child(ini_name(lpAppName)).erase(lpKeyName);
 				}
 			}
 			else {
 
 				if (pt.find(lpAppName) == pt.not_found()) {
-					pt.put_child(lpAppName, boost::property_tree::iptree());
+					pt.put_child(ini_name(lpAppName), boost::property_tree::iptree());
 				}
-				pt.get_child(lpAppName).put_child(lpKeyName, boost::property_tree::iptree(lpString));
+				pt.get_child(ini_name(lpAppName)).put_child(ini_name(lpKeyName), boost::property_tree::iptree(lpString));
 			}
 			return TRUE;
 		};
@@ -551,6 +583,10 @@ namespace memIni
 	}
 	BOOL WritePrivateProfileSection(LPCSTR lpAppName, LPCSTR lpString, LPCSTR lpFileName)
 	{
+		if (!IsInited()) {
+			return ::WritePrivateProfileSection(lpAppName, lpString, lpFileName);
+		}
+
 		if (!lpAppName) {
 			return FALSE;
 		}
@@ -572,7 +608,7 @@ namespace memIni
 
 		auto func = [&](ini_info& info)
 		{
-			info.pt.put_child(lpAppName, pt.get_child(lpAppName));
+			info.pt.put_child(ini_name(lpAppName), pt.get_child(ini_name(lpAppName)));
 			return TRUE;
 		};
 
@@ -580,6 +616,10 @@ namespace memIni
 	}
 	BOOL WritePrivateProfileStruct(LPCSTR lpAppName, LPCSTR lpKeyName, LPVOID lpStruct, UINT uSizeStruct, LPCSTR lpFileName)
 	{
+		if (!IsInited()) {
+			return ::WritePrivateProfileStruct(lpAppName, lpKeyName, lpStruct, uSizeStruct, lpFileName);
+		}
+
 		auto l = uSizeStruct * 2 + 2 + 1;
 		auto s = std::make_unique<TCHAR[]>(l);
 		BYTE sum = 0;
@@ -596,6 +636,15 @@ namespace memIni
 
 	DWORD GetPrivateProfile(LPSTR lpReturnedString, DWORD nSize, LPCSTR lpFileName)
 	{
+		if (!IsInited()) {
+			std::string s;
+			if (!ReadIniFile(s, lpFileName)) {
+				return 0;
+			}
+			s += '\0';
+			return CopyString(s, lpReturnedString, nSize);
+		}
+
 		auto pf = GetPrivateProfilePtr(lpFileName);
 		if (!pf) {
 			return 0;
@@ -613,6 +662,10 @@ namespace memIni
 	}
 	BOOL WritePrivateProfile(LPCSTR lpString, LPCSTR lpFileName)
 	{
+		if (!IsInited()) {
+			return WriteIniFile(lpString, lpFileName);
+		}
+
 		if (!ReviseFileName(lpFileName)) {
 			return FALSE;
 		}
